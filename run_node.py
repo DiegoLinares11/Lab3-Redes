@@ -24,6 +24,28 @@ lsr = LSR(me, link_costs)
 # --- deduplicación de LSPs vistos: (origin, seq)
 seen = set()
 seen_lock = threading.Lock()
+# --- deduplicación de DATA por id
+msg_seen = set()
+msg_lock = threading.Lock()
+
+def forward_data(msg: dict, sender: str | None):
+    """Reenvía DATA al siguiente salto, decrementa ttl y agrega traza."""
+    ttl = int(msg.get("ttl", 8))
+    if ttl <= 0:
+        print(f"[{me}] DROP ttl=0 DATA id={msg.get('id')}")
+        return
+    dst = msg["dst"]
+    nh = lsr.get_next_hop(dst)
+    if not nh:
+        print(f"[{me}] DROP no-route DATA id={msg.get('id')} dst={dst}")
+        return
+    # actualizar campos
+    msg["ttl"] = ttl - 1
+    hdrs = msg.get("headers", [])
+    hdrs.append({"hop": me})
+    msg["headers"] = hdrs
+    send_json(nh, msg)
+
 
 def send_json(to_id: str, obj: dict):
     host, nport = TCP_NEIGHBORS[to_id]
@@ -68,7 +90,8 @@ def handle_client(conn: socket.socket):
                 on_message(msg)
 
 def on_message(msg: dict):
-    if msg.get("type") == "INFO" and msg.get("proto") == "lsr":
+    t = msg.get("type")
+    if t == "INFO" and msg.get("proto") == "lsr":
         lsp = msg["payload"]
         key = (lsp["origin"], int(lsp["seq"]))
         with seen_lock:
@@ -76,10 +99,28 @@ def on_message(msg: dict):
                 return
             changed = lsr.ingest_lsp(lsp)
             seen.add(key)
-        # re-flood el MISMO LSP si fue nuevo
         if changed:
             flood_same_lsp(lsp, sender=None)
             maybe_print_tables()
+        return
+
+    if t == "DATA" and msg.get("proto") == "lsr":
+        # dedup por id
+        mid = msg.get("id")
+        if not mid:
+            return
+        with msg_lock:
+            if mid in msg_seen:
+                return
+            msg_seen.add(mid)
+        # entrega local o reenvío
+        if msg.get("dst") == me:
+            print(f"\n[{me}] DELIVER DATA id={mid} from={msg.get('src')} payload={msg.get('payload')}")
+            print(f"[{me}] trace={msg.get('headers', [])}")
+        else:
+            forward_data(msg, sender=None)
+        return
+
 
 def maybe_print_tables():
     # pequeña pausa para agrupar cambios
