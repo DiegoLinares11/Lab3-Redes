@@ -49,3 +49,39 @@ for nid, node in nodes.items():
         nh = rt.get_next_hop(dst)
         d = rt.cost.get(dst, float("inf"))
         print(f"  destino {dst:>2}  via {nh}   costo {d}")
+
+
+print("\n== Cambio de costo: B-C pasa de 2 -> 10 ==")
+# 1) Cambia el costo local de B hacia C
+B.on_hello_result("C", 10.0)
+C.on_hello_result("B", 10.0)
+# 2) B emite un nuevo LSP local
+lspB = B.make_local_lsp(); B.ingest_lsp(lspB); enqueue_to_all(lspB, sender="B")
+lspC = C.make_local_lsp(); C.ingest_lsp(lspC); enqueue_to_all(lspC, sender="C")
+# 3) Lo ingiere y lo "flood-eas" como antes
+B.ingest_lsp(lspB)
+enqueue_to_all(lspB, sender="B")
+
+# Procesa la cola pendiente (reutiliza queue/seen existentes)
+while queue:
+    _, target_id, lsp = queue.popleft()
+    key = (target_id, lsp["origin"], int(lsp["seq"]))
+    if key in seen: 
+        continue
+    seen.add(key)
+    t = nodes[target_id]
+    if t.ingest_lsp(lsp):
+        enqueue_to_all(lsp, sender=target_id)
+
+# Vuelve a imprimir tablas
+for nid, node in nodes.items():
+    from core.table import RoutingTable
+    rt = RoutingTable()
+    rt.update_from_lsr(node.routing_dist, node.routing_next_hop, nid)
+    print(f"\n== Tabla (post-cambio) de {nid} ==")
+    for dst in sorted(nodes.keys()):
+        if dst == nid: 
+            continue
+        nh = rt.get_next_hop(dst)
+        d  = rt.cost.get(dst, float('inf'))
+        print(f"  destino {dst:>2}  via {nh}   costo {d}")
