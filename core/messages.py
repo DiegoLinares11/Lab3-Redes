@@ -1,14 +1,15 @@
-import uuid
-from typing import Dict, Any
+import uuid, time
 
-def make_msg(proto: str, mtype: str, src: str, dst: str, payload: Any, ttl: int = 8, headers=None):
-    return {
-        "id": str(uuid.uuid4()),
-        "proto": proto,              # "lsr" | "dijkstra" | ...
-        "type": mtype,               # "info" (LSP) | "message" | "hello"
-        "from": src,
-        "to": dst,
-        "ttl": ttl,
-        "headers": headers or [],
-        "payload": payload           # para LSR: LSP dict
-    }
+def msg_info(lsp: dict):
+    return {"type":"INFO","proto":"lsr","payload": lsp}
+
+def msg_hello(src: str, dst: str):
+    return {"type":"HELLO","proto":"lsr","id": str(uuid.uuid4()),
+            "from": src, "to": dst, "ts": time.time()}
+
+def msg_echo(src: str, dst: str, hello_id: str, ts: float):
+    return {"type":"ECHO","proto":"lsr","id": hello_id, "from": src, "to": dst, "ts": ts}
+
+def msg_data(src: str, dst: str, payload: str, ttl: int = 8):
+    return {"type":"DATA","proto":"lsr","id": str(uuid.uuid4()),
+            "src": src, "dst": dst, "ttl": ttl, "headers": [], "payload": payload}
