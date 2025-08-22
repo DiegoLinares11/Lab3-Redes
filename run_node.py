@@ -1,153 +1,32 @@
-import json, socket, threading, time, sys
-from typing import Dict, Tuple, Optional
-from algoritmos.lsr import LSR
-from core.table import RoutingTable
+import sys
+from core.config import load_names, load_topo
+from core.transport_socket import SocketTransport
+from core.node import Node
 
-# ---- CLI: python run_node.py A 5000 B:127.0.0.1:5001:1 C:127.0.0.1:5002:4
-me = sys.argv[1]
-port = int(sys.argv[2])
+# Uso:
+#   python run_node.py --proto lsr --id A --names configs/names-demo.txt --topo configs/topo-demo.txt
 
-TCP_NEIGHBORS: Dict[str, Tuple[str, int]] = {}   # id -> (host, port)
-link_costs: Dict[str, float] = {}                # id -> peso
-
-for item in sys.argv[3:]:
-    parts = item.split(":")
-    if len(parts) < 3:
-        raise SystemExit(f"Vecino mal formado: {item}  (usa ID:HOST:PUERTO[:COSTO])")
-    nid, host, nport = parts[0], parts[1], int(parts[2])
-    cost = float(parts[3]) if len(parts) >= 4 else 1.0
-    TCP_NEIGHBORS[nid] = (host, nport)
-    link_costs[nid] = cost
-
-lsr = LSR(me, link_costs)
-
-# --- deduplicación de LSPs vistos: (origin, seq)
-seen = set()
-seen_lock = threading.Lock()
-# --- deduplicación de DATA por id
-msg_seen = set()
-msg_lock = threading.Lock()
-
-def forward_data(msg: dict, sender: str | None):
-    """Reenvía DATA al siguiente salto, decrementa ttl y agrega traza."""
-    ttl = int(msg.get("ttl", 8))
-    if ttl <= 0:
-        print(f"[{me}] DROP ttl=0 DATA id={msg.get('id')}")
-        return
-    dst = msg["dst"]
-    nh = lsr.get_next_hop(dst)
-    if not nh:
-        print(f"[{me}] DROP no-route DATA id={msg.get('id')} dst={dst}")
-        return
-    # actualizar campos
-    msg["ttl"] = ttl - 1
-    hdrs = msg.get("headers", [])
-    hdrs.append({"hop": me})
-    msg["headers"] = hdrs
-    send_json(nh, msg)
-
-
-def send_json(to_id: str, obj: dict):
-    host, nport = TCP_NEIGHBORS[to_id]
-    try:
-        with socket.create_connection((host, nport), timeout=1.5) as s:
-            s.sendall((json.dumps(obj) + "\n").encode("utf-8"))
-    except OSError:
-        # vecino puede estar caído o aún no levantó; está bien ignorar
-        pass
-
-def flood_same_lsp(lsp: dict, sender: Optional[str]):
-    for nid in TCP_NEIGHBORS.keys():
-        if nid != sender:
-            send_json(nid, {"type": "INFO", "proto": "lsr", "payload": lsp})
-
-def server():
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("0.0.0.0", port))
-    srv.listen()
-    while True:
-        conn, _ = srv.accept()
-        threading.Thread(target=handle_client, args=(conn,), daemon=True).start()
-
-def handle_client(conn: socket.socket):
-    buf = b""
-    with conn:
-        while True:
-            data = conn.recv(4096)
-            if not data:
-                return
-            buf += data
-            # procesar por líneas (\n)
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                if not line.strip():
-                    continue
-                try:
-                    msg = json.loads(line.decode("utf-8"))
-                except json.JSONDecodeError:
-                    continue
-                on_message(msg)
-
-def on_message(msg: dict):
-    t = msg.get("type")
-    if t == "INFO" and msg.get("proto") == "lsr":
-        lsp = msg["payload"]
-        key = (lsp["origin"], int(lsp["seq"]))
-        with seen_lock:
-            if key in seen:
-                return
-            changed = lsr.ingest_lsp(lsp)
-            seen.add(key)
-        if changed:
-            flood_same_lsp(lsp, sender=None)
-            maybe_print_tables()
-        return
-
-    if t == "DATA" and msg.get("proto") == "lsr":
-        # dedup por id
-        mid = msg.get("id")
-        if not mid:
-            return
-        with msg_lock:
-            if mid in msg_seen:
-                return
-            msg_seen.add(mid)
-        # entrega local o reenvío
-        if msg.get("dst") == me:
-            print(f"\n[{me}] DELIVER DATA id={mid} from={msg.get('src')} payload={msg.get('payload')}")
-            print(f"[{me}] trace={msg.get('headers', [])}")
-        else:
-            forward_data(msg, sender=None)
-        return
-
-
-def maybe_print_tables():
-    # pequeña pausa para agrupar cambios
-    time.sleep(0.05)
-    rt = RoutingTable()
-    rt.update_from_lsr(lsr.routing_dist, lsr.routing_next_hop, me)
-    print(f"\n== {me} tabla ==")
-    for dst, d in sorted(lsr.routing_dist.items()):
-        if dst == me or d == float("inf"):
-            continue
-        nh = rt.get_next_hop(dst)
-        print(f"  {me}->{dst}: via {nh}  costo {d}")
+def parse_args(argv):
+    args = {"--proto":"lsr","--id":None,"--names":None,"--topo":None}
+    it = iter(argv[1:])
+    for tok in it:
+        if tok in args:
+            args[tok] = next(it, None)
+    if not args["--id"] or not args["--names"] or not args["--topo"]:
+        raise SystemExit("Uso: python run_node.py --proto lsr --id A --names <path> --topo <path>")
+    return args
 
 if __name__ == "__main__":
-    threading.Thread(target=server, daemon=True).start()
-    time.sleep(0.2)
-
-    # 1) anuncio local inicial
-    lsp0 = lsr.make_local_lsp()
-    lsr.ingest_lsp(lsp0)
-    # marcamos este LSP como visto por nosotros mismos para no “rebote interno”
-    with seen_lock:
-        seen.add((lsp0["origin"], int(lsp0["seq"])))
-    flood_same_lsp(lsp0, sender=me)
-    maybe_print_tables()
-
-    # 2) mantener vivo el proceso
-    print(f"[{me}] escuchando en {port}, vecinos: {list(TCP_NEIGHBORS.keys())}")
+    args = parse_args(sys.argv)
+    names = load_names(args["--names"])
+    topo  = load_topo(args["--topo"])
+    if args["--id"] not in names:
+        raise SystemExit(f"ID {args['--id']} no está en names")
+    host, port = names[args["--id"]]
+    trans = SocketTransport(args["--id"], port, {nb:names[nb] for nb in topo.get(args["--id"], {})})
+    node  = Node(args["--id"], names, topo, proto=args["--proto"], transport=trans)
+    node.start()
+    # mantener vivo
+    import time
     while True:
         time.sleep(1)
