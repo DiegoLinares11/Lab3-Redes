@@ -1,0 +1,10 @@
+{
+  "type": "names",
+  "config": {
+    "A": "sec20.topologia1.node3.test1",
+    "B": "sec20.topologia1.node3.test2",
+    "C": "sec20.topologia1.node3.test3",
+    "D": "sec20.topologia1.node3.test4",
+    "E": "sec20.topologia1.node3.test5"
+  }
+}
