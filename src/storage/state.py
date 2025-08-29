@@ -153,6 +153,21 @@ class State:
     async def get_routing_snapshot(self) -> Dict[str, str]:
         async with self._lock:
             return dict(self.routing_table)
+        
+    async def print_routing_table(self) -> None:
+        """
+        Imprime la tabla de ruteo en formato tabular:
+        Destino | Next Hop | Costo
+        """
+        table = await self.get_routing_table()
+        print(f"\n=== Routing Table for {self.node_id} ===")
+        print(f"{'Destino':<10} {'NextHop':<10} {'Costo':<5}")
+        print("-" * 32)
+        for dest, info in table.items():
+            nh = info.get("next_hop")
+            cost = info.get("cost")
+            print(f"{dest:<10} {nh or '-':<10} {cost:<5}")
+        print("=" * 32)
 
     # -----------------------------
     # seen_cache (de-dupe)

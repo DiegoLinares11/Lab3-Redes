@@ -248,6 +248,8 @@ if __name__ == "__main__":
     async def _main():
         node = Node()
         await node.start()
+        await asyncio.sleep(8)
+        await node.state.print_routing_table()
         # Mantener vivo hasta Ctrl+C
         try:
             await asyncio.Event().wait()
