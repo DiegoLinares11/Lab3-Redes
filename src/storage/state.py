@@ -154,6 +154,33 @@ class State:
         async with self._lock:
             return dict(self.routing_table)
         
+    async def set_routing(self, table: Dict[str, str], costs: Dict[str, float]) -> None:
+        async with self._lock:
+            self.routing_table = dict(table)
+            self.routing_costs = dict(costs)
+            
+    async def get_routing_table(self) -> Dict[str, Dict[str, float]]:
+        """
+        Devuelve la tabla de ruteo en forma:
+        {
+        "A": {"next_hop": "", "cost": 0.0},
+        "B": {"next_hop": "B", "cost": 1.0},
+        "C": {"next_hop": "B", "cost": 2.0}
+        }
+        """
+        async with self._lock:
+            out: Dict[str, Dict[str, float]] = {}
+            # mi propia entrada
+            out[self.node_id] = {"next_hop": "", "cost": 0.0}
+            # incluir todo lo que haya en routing_table y routing_costs
+            keys = set(self.routing_table.keys()) | set(self.routing_costs.keys())
+            for dst in keys:
+                out[dst] = {
+                    "next_hop": self.routing_table.get(dst, ""),
+                    "cost": float(self.routing_costs.get(dst, float("inf"))),
+                }
+            return out
+
     async def print_routing_table(self) -> None:
         """
         Imprime la tabla de ruteo en formato tabular:

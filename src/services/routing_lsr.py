@@ -65,6 +65,42 @@ def _dijkstra_next_hops(
     return next_hop
 
 
+def _dijkstra_table_and_costs(graph: Dict[str, Dict[str, float]], src: str) -> tuple[Dict[str, str], Dict[str, float]]:
+    import math
+    dist = {n: math.inf for n in graph}
+    prev = {n: None for n in graph}
+    visited = {n: False for n in graph}
+    dist[src] = 0.0
+
+    for _ in range(len(graph)):
+        u, best = None, math.inf
+        for n in graph:
+            if not visited[n] and dist[n] < best:
+                u, best = n, dist[n]
+        if u is None:
+            break
+        visited[u] = True
+        for v, w in graph[u].items():
+            if visited[v]:
+                continue
+            alt = dist[u] + float(w)
+            if alt < dist[v]:
+                dist[v] = alt
+                prev[v] = u
+
+    next_hop = {}
+    for dst in graph:
+        if dst == src or dist[dst] == math.inf:
+            continue
+        cur = dst
+        while prev[cur] is not None and prev[cur] != src:
+            cur = prev[cur]
+        if prev[cur] == src:
+            next_hop[dst] = cur
+    return next_hop, dist
+
+
+
 @dataclass
 class LSRConfig:
     hello_timeout_sec: float = 20.0
@@ -227,18 +263,13 @@ class RoutingLSRService:
         self._debounce_task = asyncio.create_task(_job())
 
     async def _recompute_routes(self) -> None:
-        """
-        Recalcula next-hop por destino usando Dijkstra sobre la LSDB agregada.
-        """
         graph = await self.state.build_graph()
         if self.my_id not in graph:
-            # asegúrate de que exista mi nodo en el grafo aunque no tenga enlaces
             graph[self.my_id] = {}
-
-        table = _dijkstra_next_hops(graph, self.my_id)
-        await self.state.set_routing_table(table)
+        table, costs = _dijkstra_table_and_costs(graph, self.my_id)
+        # guarda tabla y costos en State
+        await self.state.set_routing(table, costs)
         self._last_recalc_ts = time.time()
-
         self.log.info(f"Tabla de ruteo actualizada ({len(table)} destinos)")
 
     async def _advertise_info(self) -> None:

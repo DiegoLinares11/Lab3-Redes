@@ -239,7 +239,7 @@ class Node:
 
         # sin ruta → flooding controlado (Forwarding hará de-dupe por msg_id)
         await self.transport.broadcast(self.neighbor_map.values(), pkt)
-        self.log.info(f"[CLI] MESSAGE {self.my_id}→{dst} (flooding)")
+        self.log.info(f"[CLI] MESSAGE {self.my_id}→{dst}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -248,8 +248,6 @@ if __name__ == "__main__":
     async def _main():
         node = Node()
         await node.start()
-        await asyncio.sleep(8)
-        await node.state.print_routing_table()
         # Mantener vivo hasta Ctrl+C
         try:
             await asyncio.Event().wait()
