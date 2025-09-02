@@ -4,12 +4,20 @@ import argparse
 import signal
 from typing import Optional
 
-from src.nodo import Node
+from src.nodo import Node  # usa from src.node import Node si tu archivo se llama node.py
 
-
-async def _run_node(env_path: Optional[str], send_dst: Optional[str], send_body: str) -> None:
+async def _run_node(env_path: Optional[str],
+                    send_dst: Optional[str],
+                    send_body: str,
+                    show_table: bool,
+                    wait_secs: float) -> None:
     node = Node(env_path=env_path)
     await node.start()
+
+    # Mostrar tabla de ruteo (dar tiempo a que circulen HELLO/INFO y LSR recalcule)
+    if show_table and node.state:
+        await asyncio.sleep(wait_secs)
+        await node.state.print_routing_table()
 
     # Si pidieron enviar un mensaje al arrancar
     if send_dst:
@@ -55,12 +63,30 @@ def parse_args() -> argparse.Namespace:
         default="hola",
         help="Cuerpo del mensaje a enviar con --send (por defecto: 'hola')"
     )
+    parser.add_argument(
+        "--show-table",
+        action="store_true",
+        help="Imprime la tabla de ruteo tras iniciar (espera unos segundos primero)."
+    )
+    parser.add_argument(
+        "--wait",
+        dest="wait_secs",
+        type=float,
+        default=8.0,
+        help="Segundos a esperar antes de imprimir la tabla (por defecto: 8.0)."
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    asyncio.run(_run_node(args.env_path, args.send_dst, args.send_body))
+    asyncio.run(_run_node(
+        args.env_path,
+        args.send_dst,
+        args.send_body,
+        args.show_table,
+        args.wait_secs
+    ))
 
 
 if __name__ == "__main__":
