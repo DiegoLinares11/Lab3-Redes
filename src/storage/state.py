@@ -112,9 +112,8 @@ class State:
             for u, edges in self.lsdb.items():
                 graph.setdefault(u, {})
                 for v, w in edges.items():
-                    graph[u][v] = w
-                    graph.setdefault(v, {})
-                    graph[v].setdefault(u, w)
+                    graph[u][v] = float(w)    
+                    graph.setdefault(v, {})     # solo asegura el nodo destino exista
             return graph
 
     # -----------------------------
@@ -133,23 +132,70 @@ class State:
             return dict(self.routing_table)
 
     async def get_routing_table(self) -> Dict[str, Dict[str, float]]:
-        async with self._lock:
-            out: Dict[str, Dict[str, float]] = {}
-            out[self.node_id] = {"next_hop": "", "cost": 0.0}
-            for dst, nh in self.routing_table.items():
-                out[dst] = {"next_hop": nh, "cost": 1.0}
-            return out
+        """
+        Devuelve {dst: {"next_hop": <id|->, "cost": <float|inf>}}
+        Usando:
+        - routing_table (next-hop ya calculado por LSR)
+        - LSDB -> grafo -> Dijkstra para costos reales
+        """
+        # snapshot de lo que ya tienes
+        routing = await self.get_routing_snapshot()
+        graph   = await self.build_graph()
+
+        # asegura que exista mi nodo en el grafo
+        if self.node_id not in graph:
+            graph[self.node_id] = {}
+
+        # Dijkstra local (distancias mínimas desde self.node_id)
+        import math
+        dist = {n: math.inf for n in graph.keys()}
+        vis  = {n: False     for n in graph.keys()}
+        dist[self.node_id] = 0.0
+
+        for _ in range(len(graph)):
+            u, best = None, math.inf
+            for n in graph.keys():
+                if not vis[n] and dist[n] < best:
+                    u, best = n, dist[n]
+            if u is None:
+                break
+            vis[u] = True
+            for v, w in graph[u].items():
+                if vis.get(v): 
+                    continue
+                alt = dist[u] + float(w)
+                if alt < dist[v]:
+                    dist[v] = alt
+
+        # arma tabla con next-hop (de routing_table) y costo (de dist)
+        out: Dict[str, Dict[str, float]] = {}
+        for dst in sorted(routing.keys()):
+            if dst == self.node_id:
+                continue
+            nh = routing.get(dst)
+            c  = dist.get(dst, math.inf)
+            out[dst] = {"next_hop": nh or "-", "cost": c}
+        return out
 
     async def print_routing_table(self) -> None:
+        """
+        Imprime la tabla de ruteo bonita: destino, next-hop y costo total.
+        Recalcula costos en el momento usando la LSDB.
+        """
         table = await self.get_routing_table()
-        print(f"\n=== Routing Table for {self.node_id} ===")
-        print(f"{'Destino':<10} {'NextHop':<10} {'Costo':<5}")
-        print("-" * 32)
-        for dest, info in table.items():
-            nh = info.get("next_hop") or "-"
-            cost = info.get("cost", 1.0)
-            print(f"{dest:<10} {nh:<10} {cost:<5}")
-        print("=" * 32)
+        print(f"\n== Tabla de ruteo de {self.node_id} ==")
+        print(f"{'Destino':<10} {'NextHop':<10} {'Costo':>10}")
+        print("-" * 34)
+        if not table:
+            print("(sin rutas calculadas aún)")
+        else:
+            import math
+            for dst, info in table.items():
+                nh = info.get("next_hop", "-")
+                c  = info.get("cost", math.inf)
+                cost_str = f"{c:.4f}" if c != math.inf else "inf"
+                print(f"{dst:<10} {nh:<10} {cost_str:>10}")
+        print("-" * 34)
 
     # -----------------------------
     # seen_cache

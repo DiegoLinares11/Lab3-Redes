@@ -268,9 +268,11 @@ class RoutingLSRService:
             graph[self.my_id] = {}
         table, costs = _dijkstra_table_and_costs(graph, self.my_id)
         # guarda tabla y costos en State
-        await self.state.set_routing(table, costs)
+        await self.state.set_routing_table(table)
+
         self._last_recalc_ts = time.time()
         self.log.info(f"Tabla de ruteo actualizada ({len(table)} destinos)")
+        await self.state.print_routing_table()
 
     async def _advertise_info(self) -> None:
         """
