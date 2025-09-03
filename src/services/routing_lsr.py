@@ -218,30 +218,42 @@ class RoutingLSRService:
 
     async def _watchdog(self) -> None:
         """
-        Vigila vecinos “muertos” por falta de HELLO y refresca LSDB/rutas si cambia algo.
+        Vigila:
+        1) Vecinos directos “muertos” por falta de HELLO (se cae el enlace local).
+        2) Entradas de la LSDB cuyo INFO está viejo (nodos que ya no anuncian nada).
+        Si hay cambios, dispara recálculo + anuncio (debounced).
         """
         try:
             while not self._stopping.is_set():
                 await asyncio.sleep(5.0)
-                dead = await self.state.dead_neighbors(self.cfg.hello_timeout_sec)
-                if not dead:
-                    continue
 
-                # Si hay vecinos sin HELLO, retíralos de mi fila en LSDB
                 changed = False
-                for n in dead:
-                    # solo si realmente lo tenía
-                    my_links = (await self.state.get_lsdb_snapshot()).get(self.my_id, {})
-                    if n in my_links:
-                        await self.state.remove_neighbor(n)
-                        # al remover vecino directo, ya reflejamos en LSDB (State.remove_neighbor)
-                        changed = True
-                        self.log.warning(f"Retiro enlace {self.my_id}—{n} por timeout de HELLO")
+
+                # 1) Vecinos directos sin HELLO dentro del timeout → remover mis enlaces
+                dead = await self.state.dead_neighbors(self.cfg.hello_timeout_sec)
+                if dead:
+                    snap = await self.state.get_lsdb_snapshot()
+                    my_links = snap.get(self.my_id, {})
+                    for n in dead:
+                        if n in my_links:
+                            await self.state.remove_neighbor(n)
+                            self.log.warning(f"Retiro enlace {self.my_id}—{n} por timeout de HELLO")
+                            changed = True
+
+                # 2) LSPs viejas en la LSDB (nodos que ya no publican INFO)
+                #    Regla: expira si no recibimos INFO en ~3 periodos
+                max_age = 3 * self.cfg.info_interval_sec
+                stale = await self.state.purge_stale_lsdb(max_age)
+                if stale:
+                    self.log.warning(f"LSDB: expiro info de orígenes {stale}")
+                    changed = True
 
                 if changed:
                     await self._debounced_recompute_and_advertise()
+
         except asyncio.CancelledError:
-            pass
+            return
+
 
     async def _debounced_recompute_and_advertise(self) -> None:
         """
@@ -263,7 +275,7 @@ class RoutingLSRService:
         self._debounce_task = asyncio.create_task(_job())
 
     async def _recompute_routes(self) -> None:
-        graph = await self.state.build_graph()
+        graph = await self.state.build_graph(self.cfg.hello_timeout_sec)
         if self.my_id not in graph:
             graph[self.my_id] = {}
         table, costs = _dijkstra_table_and_costs(graph, self.my_id)
@@ -283,9 +295,7 @@ class RoutingLSRService:
         """
         if self.cfg.advertise_links_from_neighbors_table:
             # anunciar mis enlaces directos (LSP de mi nodo)
-            snapshot = await self.state.get_lsdb_snapshot()
-            my_links = snapshot.get(self.my_id, {})  # {neighbor: cost}
-            view = dict(my_links)
+            view = await self.state.get_alive_links(self.cfg.hello_timeout_sec)
         else:
             # compat: anunciar una “tabla hacia destinos” (no es LSR puro, úsalo si tu grupo lo acordó)
             routing = await self.state.get_routing_snapshot()

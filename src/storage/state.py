@@ -4,7 +4,6 @@ from typing import Dict, List, Optional, Tuple
 import time
 import asyncio
 
-
 class TTLCache:
     """
     Cache de 'msg_id' vistos con TTL (para de-dupe de INFO/MESSAGE).
@@ -50,6 +49,7 @@ class State:
     node_id: str
     neighbors: Dict[str, NeighborInfo] = field(default_factory=dict)
     lsdb: Dict[str, Dict[str, float]] = field(default_factory=dict)  # por nodo: {vecino: costo}
+    lsdb_ts: dict[str, float] = field(default_factory=dict)  # <-- nuevo: último INFO por origin
     routing_table: Dict[str, str] = field(default_factory=dict)      # dst -> next_hop
     seen_cache: TTLCache = field(default_factory=lambda: TTLCache(120))
 
@@ -98,23 +98,69 @@ class State:
     # -----------------------------
     # LSDB
     # -----------------------------
-    async def update_lsdb(self, origin: str, links: Dict[str, float]) -> None:
+    async def update_lsdb(self, origin: str, links: dict[str, float]) -> None:
         async with self._lock:
             self.lsdb[origin] = dict(links)
+            self.lsdb_ts[origin] = time.time()
+
+    async def purge_stale_lsdb(self, max_age_sec: float) -> list[str]:
+        """Elimina orígenes cuyo INFO está viejo. Devuelve la lista de purgados."""
+        now = time.time()
+        removed = []
+        async with self._lock:
+            for origin, ts in list(self.lsdb_ts.items()):
+                if (now - ts) > max_age_sec:
+                    self.lsdb.pop(origin, None)
+                    self.lsdb_ts.pop(origin, None)
+                    removed.append(origin)
+        return removed
 
     async def get_lsdb_snapshot(self) -> Dict[str, Dict[str, float]]:
         async with self._lock:
             return {k: dict(v) for k, v in self.lsdb.items()}
 
-    async def build_graph(self) -> Dict[str, Dict[str, float]]:
+
+    async def build_graph(self, hello_timeout_sec: float | None = None) -> dict[str, dict[str, float]]:
         async with self._lock:
-            graph: Dict[str, Dict[str, float]] = {}
+            now = time.time()
+            graph: dict[str, dict[str, float]] = {}
+
+            # 1) Mis enlaces: opcionalmente filtrar por HELLO
+            graph.setdefault(self.node_id, {})
+            for n, info in self.neighbors.items():
+                if hello_timeout_sec is not None:
+                    if info.last_hello_ts == 0 or (now - info.last_hello_ts) > hello_timeout_sec:
+                        continue
+                graph[self.node_id][n] = info.cost
+                graph.setdefault(n, {}).setdefault(self.node_id, info.cost)
+
+            # 2) LSP de terceros: aceptarlos, pero opcionalmente
+            #    descartar aristas hacia nodos que nunca hemos visto vivos
+            def is_alive(node_id: str) -> bool:
+                ni = self.neighbors.get(node_id)
+                return bool(ni and ni.last_hello_ts and (now - ni.last_hello_ts) <= (hello_timeout_sec or 0))
+
             for u, edges in self.lsdb.items():
                 graph.setdefault(u, {})
                 for v, w in edges.items():
-                    graph[u][v] = float(w)    
-                    graph.setdefault(v, {})     # solo asegura el nodo destino exista
+                    if hello_timeout_sec is not None and not is_alive(v) and v != self.node_id:
+                        # si no tenemos evidencia de vida de 'v', evita usarlo
+                        continue
+                    graph[u][v] = w
+                    graph.setdefault(v, {})
+                    graph[v].setdefault(u, w)
+
             return graph
+
+
+    async def get_alive_links(self, hello_timeout_sec: float) -> dict[str, float]:
+        now = time.time()
+        async with self._lock:
+            out = {}
+            for n, info in self.neighbors.items():
+                if info.last_hello_ts and (now - info.last_hello_ts) <= hello_timeout_sec:
+                    out[n] = info.cost
+            return out
 
     # -----------------------------
     # Tabla de ruteo (costos fijos en 1)
